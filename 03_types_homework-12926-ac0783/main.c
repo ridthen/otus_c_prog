@@ -87,7 +87,7 @@ struct cfh {
 #define CFH_SIGNATURE 0x02014b50 /* "PK\1\2" little-endian. */
 
 static bool read_cfh(struct cfh *cfh, const uint8_t *src, size_t src_len,
-                     size_t offset, const size_t *zfo_ptr)
+                     size_t offset, const size_t *zip_file_offset)
 {
     const uint8_t *p;
     uint32_t signature;
@@ -117,7 +117,7 @@ static bool read_cfh(struct cfh *cfh, const uint8_t *src, size_t src_len,
     cfh->disk_nbr_start = READ16(p);
     cfh->int_attrs = READ16(p);
     cfh->ext_attrs = READ32(p);
-    cfh->lfh_offset = READ32(p) + *zfo_ptr;
+    cfh->lfh_offset = READ32(p) + *zip_file_offset;
     cfh->name = p;
     cfh->extra = cfh->name + cfh->name_len;
     cfh->comment = cfh->extra + cfh->extra_len;
@@ -166,7 +166,8 @@ static void ctime2dos(time_t t, uint16_t *dos_date, uint16_t *dos_time)
     *dos_date |= (tm->tm_year - 80) << 9; /* Bits 9--15: Year from 1980. */
 }
 
-static bool find_eocdr(struct eocdr *r, const uint8_t *src, size_t src_len)
+static bool find_eocdr(struct eocdr *r, const uint8_t *src,
+        size_t src_len, size_t *cd_offset)
 {
     size_t comment_len;
     const uint8_t *p;
@@ -186,8 +187,10 @@ static bool find_eocdr(struct eocdr *r, const uint8_t *src, size_t src_len)
             r->disk_cd_entries = READ16(p);
             r->cd_entries = READ16(p);
             r->cd_size = READ32(p);
-            (p) += 4; // skip written cd_offset
-            r->cd_offset = src_len - r->cd_size - EOCDR_BASE_SZ - comment_len; // calculate cd_offset
+            // Сохраним записанное в eocdr значение cd_offset, а в eocdr r запишем
+            // правильное, вычисленное значение.
+            *cd_offset = READ32(p);
+            r->cd_offset = src_len - r->cd_size - EOCDR_BASE_SZ - comment_len;
             r->comment_len = READ16(p);
             r->comment = p;
             assert(p == &src[src_len - comment_len] &&
@@ -296,69 +299,6 @@ struct zipmemb_t {
     zipiter_t next;           /* Iterator to the next member. */
 };
 
-/* Поиск zip_file_offset.
-     Сдвиги, записанные в cfh.lfh_offset начинаются с 0, а в нашем случае перед zip файлом
-     находится другой файл (jpeg) и нужно найти его длину, чтобы получить доступ к lfh и к
-     сжатым данным. Но это всё не требуется для получения имен файлов, их можно читать и из
-     cfh.*/
-/*
-_________________________________________________________________
-|          JPEG             |     ^                             ^
-|                           | zip_file_offset                   |
-__________________________________|___________________________  |
-|   Local File Header 1     |     ^                             |
-|       File Data 1         |     |                             |
-|   Local File Header 2     |     |                             |
-|       File Data 2         |  last cfh.lfd_offset           src_len
-|          ...              |     |                             |
-|                           |_____|___________________________  |
-|   Local File Header n     | LFH_BASE_SZ+name_len+extra_len+4  |
-|       File Data n         |____+comp_size+data_desc_size____  |
-|  Central File Header 1    |  ^                                |
-|  Central File Header 2    | cd_size                           |
-|          ...              |__|______________________________  |
-| End of Central Directory  | EOCDR_BASE_SZ + comment_len       |
------------------------------------------------------------------
- */
-bool zfo(zip_t *zip, const uint8_t *src, size_t src_len, size_t *zfo_ptr) {
-    struct eocdr eocdr;
-    struct cfh cfh;
-    size_t i, offset;
-    uint8_t data_descriptor_size;
-
-    zip->src = src;
-    zip->src_len = src_len;
-
-    if (!find_eocdr(&eocdr, src, src_len)) {
-        return false;
-    }
-
-    if (eocdr.disk_nbr != 0 || eocdr.cd_start_disk != 0 ||
-        eocdr.disk_cd_entries != eocdr.cd_entries) {
-        return false; /* Cannot handle multi-volume archives. */
-    }
-
-    offset = eocdr.cd_offset;
-    *zfo_ptr = 0;
-    for (i = 0; i < eocdr.cd_entries; i++) {
-        if (!read_cfh(&cfh, src, src_len, offset, zfo_ptr)) {
-            return false;
-        }
-        offset += CFH_BASE_SZ + cfh.name_len + cfh.extra_len +
-                  cfh.comment_len;
-    }
-
-    // last member cfh
-    data_descriptor_size = 0;
-    if ((cfh.gp_flag >> 3) & 0x01)
-        data_descriptor_size = DATA_DESC_SIZE;
-
-    *zfo_ptr = src_len - (cfh.lfh_offset + LFH_BASE_SZ + cfh.name_len +
-            cfh.extra_len + EXTRA_LEN_PADDING + cfh.comp_size + data_descriptor_size +
-            eocdr.cd_size + EOCDR_BASE_SZ + eocdr.comment_len);
-
-    return true;
-}
 
 /* Initialize zip based on the source data. Returns true on success, or false
    if the data could not be parsed as a valid Zip file. */
@@ -369,17 +309,19 @@ bool zip_read(zip_t *zip, const uint8_t *src, size_t src_len, size_t *zip_file_o
     struct lfh lfh;
     size_t i, offset;
     const uint8_t *comp_data;
+    size_t *cd_offset;
 
     zip->src = src;
     zip->src_len = src_len;
 
-    if (!zfo(zip, src, src_len, zip_file_offset)) {
+    if (!find_eocdr(&eocdr, src, src_len, cd_offset)) {
         return false;
     }
 
-    if (!find_eocdr(&eocdr, src, src_len)) {
-        return false;
-    }
+    // Сдвиг zip-файла относительно начала jpeg-файла потребуется для корректировки
+    // сдвигов cfh.lfh_offset
+    *zip_file_offset = src_len - (*cd_offset + eocdr.cd_size +
+            EOCDR_BASE_SZ + eocdr.comment_len);
 
     if (eocdr.disk_nbr != 0 || eocdr.cd_start_disk != 0 ||
         eocdr.disk_cd_entries != eocdr.cd_entries) {
