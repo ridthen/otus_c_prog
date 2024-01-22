@@ -124,7 +124,7 @@ static bool read_cfh(struct cfh *cfh, const uint8_t *src, size_t src_len,
     assert(p == &src[offset + CFH_BASE_SZ] && "All fields read.");
 
     if (src_len - offset - CFH_BASE_SZ <
-        cfh->name_len + cfh->extra_len + cfh->comment_len) {
+            (size_t) (cfh->name_len + cfh->extra_len + cfh->comment_len)) {
         return false;
     }
 
@@ -150,21 +150,21 @@ static time_t dos2ctime(uint16_t dos_date, uint16_t dos_time)
     return mktime(&tm);
 }
 
-/* Convert time_t to DOS date and time. */
-static void ctime2dos(time_t t, uint16_t *dos_date, uint16_t *dos_time)
-{
-    struct tm *tm = localtime(&t);
-
-    *dos_time = 0;
-    *dos_time |= tm->tm_sec / 2;    /* Bits 0--4:  Second divided by two. */
-    *dos_time |= tm->tm_min << 5;   /* Bits 5--10: Minute. */
-    *dos_time |= tm->tm_hour << 11; /* Bits 11-15: Hour. */
-
-    *dos_date = 0;
-    *dos_date |= tm->tm_mday;             /* Bits 0--4:  Day (1--31). */
-    *dos_date |= (tm->tm_mon + 1) << 5;   /* Bits 5--8:  Month (1--12). */
-    *dos_date |= (tm->tm_year - 80) << 9; /* Bits 9--15: Year from 1980. */
-}
+///* Convert time_t to DOS date and time. */
+//static void ctime2dos(time_t t, uint16_t *dos_date, uint16_t *dos_time)
+//{
+//    struct tm *tm = localtime(&t);
+//
+//    *dos_time = 0;
+//    *dos_time |= tm->tm_sec / 2;    /* Bits 0--4:  Second divided by two. */
+//    *dos_time |= tm->tm_min << 5;   /* Bits 5--10: Minute. */
+//    *dos_time |= tm->tm_hour << 11; /* Bits 11-15: Hour. */
+//
+//    *dos_date = 0;
+//    *dos_date |= tm->tm_mday;             /* Bits 0--4:  Day (1--31). */
+//    *dos_date |= (tm->tm_mon + 1) << 5;   /* Bits 5--8:  Month (1--12). */
+//    *dos_date |= (tm->tm_year - 80) << 9; /* Bits 9--15: Year from 1980. */
+//}
 
 static bool find_eocdr(struct eocdr *r, const uint8_t *src,
         size_t src_len, size_t *cd_offset)
@@ -309,18 +309,20 @@ bool zip_read(zip_t *zip, const uint8_t *src, size_t src_len, size_t *zip_file_o
     struct lfh lfh;
     size_t i, offset;
     const uint8_t *comp_data;
-    size_t *cd_offset;
+    size_t cd_offset;
+
 
     zip->src = src;
     zip->src_len = src_len;
 
-    if (!find_eocdr(&eocdr, src, src_len, cd_offset)) {
+    if (!find_eocdr(&eocdr, src, src_len, &cd_offset)) {
+        printf("No ZIP file found\n");
         return false;
     }
 
     // Сдвиг zip-файла относительно начала jpeg-файла потребуется для корректировки
     // сдвигов cfh.lfh_offset
-    *zip_file_offset = src_len - (*cd_offset + eocdr.cd_size +
+    *zip_file_offset = src_len - (cd_offset + eocdr.cd_size +
             EOCDR_BASE_SZ + eocdr.comment_len);
 
     if (eocdr.disk_nbr != 0 || eocdr.cd_start_disk != 0 ||
