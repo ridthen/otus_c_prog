@@ -2,14 +2,39 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
 
 /*
  * Реализация хэш-таблицы с открытой адресацией со строками в качестве ключей и целыми числами в качестве значений.
  * Приложение подсчитывающее частоту слов в заданном файле.
  */
 
-#define PERROR_IF(cond, msg) if (cond) { perror(msg); exit(1); }
+#define NUMARGS(...)  (sizeof((void* []){0, ##__VA_ARGS__})/sizeof(void*)-1)
+#define PERROR_IF(cond, msg, ...) perror_if(cond, msg, __LINE__, NUMARGS(__VA_ARGS__), ##__VA_ARGS__)
 
+/**
+ * Проверяет успешность завершения функции в коде, если не завершение не успешно, печатает сообщение об ошибке,
+ * номер строки, откуда макрос PERROR_IF был вызван, освобождает память, если были переданы указатели.
+ *
+ * @param cond выполняет все дальнейшие действия при истиности условия
+ * @param msg произвольное имя вызвавшей фукнции
+ * @param linenum номер строки кода в которой был вызван вспомогательный макрос PERROR_IF (из макроса)
+ * @param numargs количество указателей, которые необходимо освободить (берутся из макроса)
+ * @param ... адреса указателей или NULL
+ */
+void perror_if(const int cond, const char* msg, const size_t linenum, int numargs, ...) {
+    if (cond) {
+        va_list ap;
+        fprintf(stderr, "line %lu: ", linenum);
+        perror(msg);
+        // printf("Number of pointers freed: %d\n", numargs);
+        va_start(ap, numargs);
+        while (numargs--)
+            free(va_arg(ap, void*));
+        va_end(ap);
+        exit(1);
+    }
+}
 /**
  * Функция-обертка для malloc с проверкой возвращаемого указателя на NULL
  * @param size Размер выделяемой памяти, байт
@@ -18,7 +43,7 @@
 static void *xmalloc(size_t size)
 {
     void *ptr = malloc(size);
-    PERROR_IF(ptr == NULL, "malloc");
+    PERROR_IF(ptr == NULL, "malloc", ptr);
     return ptr;
 }
 
@@ -31,7 +56,7 @@ static void *xmalloc(size_t size)
 static void *xrealloc(void *ptr, size_t size)
 {
     ptr = realloc(ptr, size);
-    PERROR_IF(ptr == NULL, "realloc");
+    PERROR_IF(ptr == NULL, "realloc", ptr);
     return ptr;
 }
 
@@ -44,7 +69,7 @@ static void *xrealloc(void *ptr, size_t size)
 static void *xcalloc(size_t nmemb, size_t size)
 {
     void *ptr = calloc(nmemb, size);
-    PERROR_IF(ptr == NULL, "realloc");
+    PERROR_IF(ptr == NULL, "realloc", ptr);
     return ptr;
 }
 
@@ -61,7 +86,7 @@ static char *read_file(const char *filename, size_t *file_sz)
     size_t buf_cap;
 
     f = fopen(filename, "rb");
-    PERROR_IF(f == NULL, "fopen");
+    PERROR_IF(f == NULL, "fopen", NULL);
 
     buf_cap = 4096;
     buf = xmalloc(buf_cap);
@@ -74,10 +99,10 @@ static char *read_file(const char *filename, size_t *file_sz)
         }
 
         *file_sz += fread(&buf[*file_sz], 1, buf_cap - *file_sz, f);
-        PERROR_IF(ferror(f), "fread");
+        PERROR_IF(ferror(f), "fread", buf);
     }
 
-    PERROR_IF(fclose(f) != 0, "fclose");
+    PERROR_IF(fclose(f) != 0, "fclose", buf);
     return buf;
 }
 
@@ -138,7 +163,7 @@ void freeEntry(Entry **e) {
  * @param str строка
  * @return числовое значение хеш-кода
  */
-unsigned long long hashcode(unsigned char *str) {
+unsigned long long hashcode(const char *str) {
     unsigned long long hash = 5381;
     int c;
 
@@ -355,14 +380,13 @@ Entry *xremove(Hashmap *map, K key) {
  * Обходит все элементы карты и применят функцию f к каждому элементу
  * @param map Объект Hashmap
  * @param f Функция, применяемая к каждому элементу карты
- * @param data опциональные данные для функции, применяемой к элементу
  */
-void mapIterate(Hashmap *map, void(*f)(Entry*, void*), void* data) {
+void mapIterate(Hashmap *map, void(*f)(Entry*)) {
     size_t size, i;
     size = map->arr_size;
     for (i = 0; i < size; i++) {
         if (map->data[i]) {
-            f(map->data[i], data);
+            f(map->data[i]);
         }
     }
 }
@@ -370,9 +394,8 @@ void mapIterate(Hashmap *map, void(*f)(Entry*, void*), void* data) {
 /**
  * Выводит в консоль ключ и значение элемента карты.
  * @param e Объект Entry
- * @param data опциональные данные для совместимости с mapIterate(). Могут быть NULL.
  */
-void printEntry(Entry *e, void* data) {
+void printEntry(const Entry *e) {
     printf("%5lu %s\n", *e->value, e->key);
 }
 
@@ -492,7 +515,7 @@ void printDescending(Hashmap *map) {
     printf("Total: %lu uniq words\n", map->size);
     while (map->size > 0) {
         maxEntry = getMaxEntry(map);
-        printEntry(maxEntry, NULL);
+        printEntry(maxEntry);
         xremove(map, maxEntry->key);
     }
 }
