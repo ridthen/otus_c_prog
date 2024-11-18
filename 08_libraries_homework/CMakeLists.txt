@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25.1)
 project(08_libraries_homework C)
-
+add_compile_options(-Wall -Wextra -Wpedantic -std=c11)
 set(CMAKE_C_STANDARD 11)
 
 find_package(CURL REQUIRED)
@@ -10,5 +10,3 @@ include_directories(${json-c_INCLUDE_DIR})
 include_directories(${JSON-C})
 target_link_libraries(fetchWeather CURL::libcurl)
 target_link_libraries(fetchWeather json-c::json-c)
-
-add_compile_options(-Wall -Wextra -Wpedantic -std=c11)
