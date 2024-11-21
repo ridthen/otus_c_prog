@@ -7,116 +7,8 @@
 /*
  * Реализация хэш-таблицы с открытой адресацией со строками в качестве ключей и целыми числами в качестве значений.
  * Приложение подсчитывающее частоту слов в заданном файле.
+ * 
  */
-
-#define NUMARGS(...)  (sizeof((void* []){0, ##__VA_ARGS__})/sizeof(void*)-1)
-#define PERROR_IF(cond, msg, ...) perror_if(cond, msg, __LINE__, NUMARGS(__VA_ARGS__), ##__VA_ARGS__)
-
-/**
- * Проверяет успешность завершения функции в коде, если не завершение не успешно, печатает сообщение об ошибке,
- * номер строки, откуда макрос PERROR_IF был вызван, освобождает память, если были переданы указатели.
- *
- * @param cond выполняет все дальнейшие действия при истиности условия
- * @param msg произвольное имя вызвавшей фукнции
- * @param linenum номер строки кода в которой был вызван вспомогательный макрос PERROR_IF (из макроса)
- * @param numargs количество указателей, которые необходимо освободить (берутся из макроса)
- * @param ... адреса указателей или NULL
- */
-void perror_if(const int cond, const char* msg, const size_t linenum, int numargs, ...) {
-    if (cond) {
-        va_list ap;
-        fprintf(stderr, "line %lu: ", linenum);
-        perror(msg);
-        // printf("Number of pointers freed: %d\n", numargs);
-        va_start(ap, numargs);
-        while (numargs--)
-            free(va_arg(ap, void*));
-        va_end(ap);
-        exit(1);
-    }
-}
-/**
- * Функция-обертка для malloc с проверкой возвращаемого указателя на NULL
- * @param size Размер выделяемой памяти, байт
- * @return void указатель на выделенную область памяти
- */
-static void *xmalloc(size_t size)
-{
-    void *ptr = malloc(size);
-    PERROR_IF(ptr == NULL, "malloc", ptr);
-    return ptr;
-}
-
-/**
- * Функция-обертка для realloc с проверкой возвращаемого значения на NULL
- * @param ptr void указатель для расширяемой области памяти
- * @param size новый размер выделяемой памяти, байт
- * @return void указатель на выделенную область памяти
- */
-static void *xrealloc(void *ptr, size_t size)
-{
-    ptr = realloc(ptr, size);
-    PERROR_IF(ptr == NULL, "realloc", ptr);
-    return ptr;
-}
-
-/**
- * Функция-обертка для calloc с проверкой возвращаемого значения на NULL
- * @param nmemb количество элементов
- * @param size размер памяти для одного элемента
- * @return void указатель на выделенную область памяти
- */
-static void *xcalloc(size_t nmemb, size_t size)
-{
-    void *ptr = calloc(nmemb, size);
-    PERROR_IF(ptr == NULL, "realloc", ptr);
-    return ptr;
-}
-
-/**
- * Считывает данные из файла
- * @param filename имя файла, который необходимо прочитать
- * @param file_sz указатель на переменную, в которую будет записан размер прочитанного файла
- * @return указатель на считанные из файла данные
- */
-static char *read_file(const char *filename, size_t *file_sz)
-{
-    FILE *f;
-    char *buf;
-    size_t buf_cap;
-
-    f = fopen(filename, "rb");
-    PERROR_IF(f == NULL, "fopen", NULL);
-
-    buf_cap = 4096;
-    buf = xmalloc(buf_cap);
-
-    *file_sz = 0;
-    while (feof(f) == 0) {
-        if (buf_cap - *file_sz == 0) {
-            buf_cap *= 2;
-            buf = xrealloc(buf, buf_cap);
-        }
-
-        *file_sz += fread(&buf[*file_sz], 1, buf_cap - *file_sz, f);
-        PERROR_IF(ferror(f), "fread", buf);
-    }
-
-    PERROR_IF(fclose(f) != 0, "fclose", buf);
-    return buf;
-}
-
-/**
- * Печатает сообщение о способе запуска программы
- * @param argv0 название файла вызываемой программы
- */
-static void print_usage(const char *argv0)
-{
-    printf("Counts the frequency of words in a file\n\n");
-    printf("Usage:\n\n");
-    printf("  %s <input_file>\n", argv0);
-    printf("\n");
-}
 
 static const float LOAD_FACTOR = 0.5f;
 static const size_t INITIAL_SIZE = 100;
@@ -139,6 +31,96 @@ typedef struct Entry {
     K key;
     V value;
 } Entry;
+
+/**
+ * Структура карты с открытой адресацией
+ */
+typedef struct Hashmap {
+    Entry **data;       // массив корзин
+    size_t size;        // количество элементов в карте
+    size_t arr_size;    // размер массива корзин
+    size_t limit;       // целочисленное значение количества элементов карты при превышении которого происходит пересборка
+    float loadFactor;   // процентное заполнение, при превышении которого происходит пересборка
+    float multiplier;   // во сколько раз увеличится размер карты при пересборке
+} Hashmap;
+
+Hashmap* rehashUp(Hashmap **_map_, Entry* e);
+void destroyHashmap(Hashmap **_map_);
+
+#define NUMARGS(...)  (sizeof((void* []){0, ##__VA_ARGS__})/sizeof(void*)-1)
+#define PERROR_IF(cond, msg, map, ...) perror_if(cond, msg, map, __LINE__, NUMARGS(__VA_ARGS__), ##__VA_ARGS__)
+
+/**
+ * Проверяет успешность завершения функции в коде, если не завершение не успешно, печатает сообщение об ошибке,
+ * номер строки, откуда макрос PERROR_IF был вызван, освобождает память, если были переданы указатели.
+ *
+ * @param cond выполняет все дальнейшие действия при истиности условия
+ * @param msg произвольное имя вызвавшей фукнции
+ * @param map структура Hashmap, память которой необходимо освободить
+ * @param linenum номер строки кода в которой был вызван вспомогательный макрос PERROR_IF (из макроса)
+ * @param numargs количество указателей, которые необходимо освободить (берутся из макроса)
+ * @param ... адреса указателей или NULL
+ */
+void perror_if(const int cond, const char* msg, Hashmap *map, const size_t linenum, int numargs, ...) {
+    if (cond) {
+        va_list ap;
+        fprintf(stderr, "line %lu: ", linenum);
+        perror(msg);
+        destroyHashmap(&map);
+        // printf("Number of pointers freed: %d\n", numargs);
+        va_start(ap, numargs);
+        while (numargs--)
+            free(va_arg(ap, void*));
+        va_end(ap);
+        exit(1);
+    }
+}
+
+/**
+ * Считывает данные из файла
+ * @param filename имя файла, который необходимо прочитать
+ * @param file_sz указатель на переменную, в которую будет записан размер прочитанного файла
+ * @param map Структура Hashmap, удаляемая в случае необходимости exit(1) из программы
+ * @return указатель на считанные из файла данные
+ */
+static char *read_file(const char *filename, size_t *file_sz, Hashmap *map)
+{
+    char *buf;
+
+    FILE *f = fopen(filename, "rb");
+    PERROR_IF(f == NULL, "fopen", map, NULL);
+
+    size_t buf_cap = 4096;
+    buf = malloc(buf_cap);
+    PERROR_IF(buf == NULL, "malloc", map, NULL);
+
+    *file_sz = 0;
+    while (feof(f) == 0) {
+        if (buf_cap - *file_sz == 0) {
+            buf_cap *= 2;
+            buf = realloc(buf, buf_cap);
+            PERROR_IF(buf == NULL, "malloc", map, NULL);
+        }
+
+        *file_sz += fread(&buf[*file_sz], 1, buf_cap - *file_sz, f);
+        PERROR_IF(ferror(f), "fread", map, buf);
+    }
+
+    PERROR_IF(fclose(f) != 0, "fclose", map, buf);
+    return buf;
+}
+
+/**
+ * Печатает сообщение о способе запуска программы
+ * @param argv0 название файла вызываемой программы
+ */
+static void print_usage(const char *argv0)
+{
+    printf("Counts the frequency of words in a file\n\n");
+    printf("Usage:\n\n");
+    printf("  %s <input_file>\n", argv0);
+    printf("\n");
+}
 
 /**
  * Удаляет объект Entry и высвобождает память
@@ -173,20 +155,7 @@ unsigned long long hashcode(const char *str) {
     return hash;
 }
 
-/**
- * Структура карты с открытой адресацией
- */
-typedef struct Hashmap {
-    Entry **data;       // массив корзин
-    size_t size;        // количество элементов в карте
-    size_t arr_size;    // размер массива корзин
-    size_t limit;       // целочисленное значение количества элементов карты при превышении которого происходит пересборка
-    float loadFactor;   // процентное заполнение, при превышении которого происходит пересборка
-    float multiplier;   // во сколько раз увеличится размер карты при пересборке
-} Hashmap;
 
-
-Hashmap* rehashUp(Hashmap **_map_, Entry* e);
 
 /**
  * Создает экземпляр карты с открытой адресацией
@@ -196,15 +165,39 @@ Hashmap* rehashUp(Hashmap **_map_, Entry* e);
  * @return Hashmap*
  */
 Hashmap* createHashmap(size_t limit, float loadFactor, float multiplier) {
-    Hashmap *tmp = (Hashmap*) xmalloc(sizeof(Hashmap));
+    Hashmap *tmp = (Hashmap*) malloc(sizeof(Hashmap));
+    PERROR_IF(tmp == NULL, "malloc", NULL, NULL);
     tmp->arr_size = (limit >= INITIAL_SIZE) ? limit : INITIAL_SIZE;
     tmp->loadFactor = (loadFactor >= LOAD_FACTOR && loadFactor <= 1.0f) ? loadFactor : LOAD_FACTOR;
     tmp->limit = (int)(tmp->loadFactor * tmp->arr_size);
     tmp->size = 0;
     tmp->multiplier = (multiplier >= MULTIPLIER) ? multiplier : MULTIPLIER;
 
-    tmp->data = (Entry**) xcalloc(tmp->arr_size, sizeof(Entry*));
+    tmp->data = (Entry**) calloc(tmp->arr_size, sizeof(Entry*));
+    PERROR_IF(tmp->data == NULL, "calloc", tmp, NULL);
     return tmp;
+}
+
+/**
+ * Удаляет карту Hashmap и высвобождает память
+ * @param _map_ Объект Hashmap
+ */
+void destroyHashmap(Hashmap **_map_) {
+    if (_map_ == NULL) return;
+    Hashmap *map = *_map_;
+    size_t i, size;
+
+    size = map->arr_size;
+    for (i = 0; i < size; i++) {
+        if (map->data[i]) {
+            FREE_ENTRY(&(map->data[i]));
+        }
+    }
+    if (map->size > 0) {
+        free(map->data);
+    }
+    free(*_map_);
+    *_map_ = NULL;
 }
 
 /**
@@ -245,7 +238,8 @@ void raw_put(Hashmap **_map_, Entry *e) {
  * @param value значение нового элемента
  */
 void put(Hashmap **map, K key, V value) {
-    Entry *e = (Entry*) xmalloc(sizeof(Entry));
+    Entry *e = malloc(sizeof(Entry));
+    PERROR_IF(e == NULL, "malloc", *map, key, value);
     e->key = key;
     e->value = value;
     raw_put(map, e);
@@ -279,27 +273,6 @@ Hashmap* rehashUp(Hashmap **_map_, Entry* e) {
 }
 
 /**
- * Удаляет карту Hashmap и высвобождает память
- * @param _map_ Объект Hashmap
- */
-void destroyHashmap(Hashmap **_map_) {
-    Hashmap *map = *_map_;
-    size_t i, size;
-
-    size = map->arr_size;
-    for (i = 0; i < size; i++) {
-        if (map->data[i]) {
-            FREE_ENTRY(&(map->data[i]));
-        }
-    }
-    if (map->size > 0) {
-        free(map->data);
-    }
-    free(*_map_);
-    *_map_ = NULL;
-}
-
-/**
  * Получение элемента карты по ключу.
  *
  * @brief get
@@ -316,7 +289,7 @@ V get(Hashmap *map, K key) {
         if (CMP_EQ(map->data[index]->key, key)) {
             retVal = map->data[index]->value;
         } else {
-            char found = 1;
+            int found = 1;
             while (map->data[index] == NULL ||
                 !CMP_EQ(map->data[index]->key, key)) {
                 index++;
@@ -376,51 +349,6 @@ Entry *xremove(Hashmap *map, K key) {
     return retVal;
 }
 
-/**
- * Обходит все элементы карты и применят функцию f к каждому элементу
- * @param map Объект Hashmap
- * @param f Функция, применяемая к каждому элементу карты
- */
-void mapIterate(Hashmap *map, void(*f)(Entry*)) {
-    size_t size, i;
-    size = map->arr_size;
-    for (i = 0; i < size; i++) {
-        if (map->data[i]) {
-            f(map->data[i]);
-        }
-    }
-}
-
-/**
- * Выводит в консоль ключ и значение элемента карты.
- * @param e Объект Entry
- */
-void printEntry(const Entry *e) {
-    printf("%5lu %s\n", *e->value, e->key);
-}
-
-/**
- * Создает в памяти копию строки для дальнейшего использования в качестве ключа элемента карты
- * @param str строка
- * @return Возвращает указатель на созданную копию строки
- */
-char* initAndCopy(const char *str) {
-    char *word = (char*) xmalloc(strlen(str) + 1);
-    strcpy(word, str);
-    return word;
-}
-
-/**
- * Создает в памяти копию переменной для дальнейшего использования в качестве значения элемента карты
- * @param count переменная с количеством слов
- * @return указатель на созданную копию
- */
-size_t* initAndCopyInt(const size_t count) {
-    size_t *value = (size_t*) xmalloc(1);
-    *value = count;
-    return value;
-}
-
 #define IN 1     /* внутри слова */
 #define OUT 0    /* снаружи слова */
 #define MAX_WORD_LEN 128
@@ -430,17 +358,17 @@ size_t* initAndCopyInt(const size_t count) {
  * @param input_file указатель на имя файла, в котором необходимо посчитать частоту слов.
  * @return карту Hashmap со словами в качестве ключей и их частотой в качестве значений
  */
-static Hashmap* countWords(const char* input_file) {
+Hashmap* countWords(const char* input_file) {
     Hashmap *map = createHashmap(2, 0.5f, 2.0f);
     size_t input_file_size;
     size_t word_len = 0;
     char c;
-    char *input_data = read_file(input_file, &input_file_size);
+    char *input_data = read_file(input_file, &input_file_size, map);
     char *input_data_init_ptr = input_data;
-    char *word = (char*) xmalloc(MAX_WORD_LEN);
+    char *word = (char*) malloc(sizeof(char)*MAX_WORD_LEN);
     char *word_init_ptr = word;
+    PERROR_IF(word == NULL, "malloc", map, input_data);
     char state = OUT;
-    size_t count;
 
     while(input_file_size > 0) {
         c = *input_data++;
@@ -455,18 +383,24 @@ static Hashmap* countWords(const char* input_file) {
                 // end of the word
                 state = OUT;
                 *word = '\0';
-                word = word_init_ptr; // restore initial pointer
-                size_t *ptr;
-                if ((ptr = get(map, word)) != NULL) {
-                    count = *ptr;
-                    count++;
-                    xremove(map, word);
-                    put(&map, initAndCopy(word), initAndCopyInt(count));
+                word = word_init_ptr;
+                // word -= word_len+1; // указатель в начало слова
+                char *key = malloc(strlen(word)*sizeof(char) + sizeof(char));
+                PERROR_IF(key == NULL, "malloc", map, word, input_data_init_ptr);
+                strcpy(key, word);
+                size_t *value = malloc(sizeof(size_t));
+                PERROR_IF(value == NULL, "malloc", map, word, key, input_data_init_ptr);
+
+                size_t *old_value;
+                if ((old_value = get(map, key)) != NULL) {
+                    *value = *old_value+1;
+                    Entry* e = xremove(map, key);
+                    FREE_ENTRY(&e);
+                    put(&map, key, value);
                 } else {
-                    count = 1;
-                    put(&map, initAndCopy(word), initAndCopyInt(count));
+                    *value = 1;
+                    put(&map, key, value);
                 }
-                count = 0;
             }
         } else if (state == OUT) {
             // new word
@@ -481,49 +415,41 @@ static Hashmap* countWords(const char* input_file) {
             }
         }
     }
-    free(word);
+
+    free(word_init_ptr);
     free(input_data_init_ptr);
     return map;
 }
 
 /**
- * Ищет в карте Hashmap элемент с максимальным значением
- * @param map карта Hashmap
- * @return элемент Entry c максимальным значением
- */
-Entry* getMaxEntry(const Hashmap *map) {
-    Entry *maxEntry = (Entry*) xmalloc(sizeof(Entry));
-    *maxEntry->value = 0;
-    size_t size, i;
-    size = map->arr_size;
-    for (i = 0; i < size; i++) {
-        if (map->data[i] != NULL && *map->data[i]->value >= *maxEntry->value) {
-            maxEntry->value = map->data[i]->value;
-            maxEntry->key = map->data[i]->key;
-        }
-    }
-    return maxEntry;
-}
-
-/**
- * Выводит в консоль элементы Hashmap, отсортированные с уменьшением частоты встречаемости.
- * Удаляет все элементы из карты по мере продвижения по ней и поиска максимального значения.
+ * Выводит в stdout элементы Hashmap, отсортированные по значению в порядке убывания
  * @param map карта Hashmap
  */
 void printDescending(Hashmap *map) {
-    Entry *maxEntry;
-    printf("Total: %lu uniq words\n", map->size);
-    while (map->size > 0) {
-        maxEntry = getMaxEntry(map);
-        printEntry(maxEntry);
-        xremove(map, maxEntry->key);
+    K* keysDesc = malloc(sizeof(K) * map->size);
+    PERROR_IF(keysDesc == NULL, "malloc", map, NULL);
+    size_t maxValue = 0;
+    for (size_t i = 0; i < map->size; i++) {
+        for (size_t j = 0; j < map->arr_size; j++) {
+            if (map->data[j] != NULL && *map->data[j]->value >= maxValue) {
+                for (size_t k = 0; k < i; k++)
+                    if (map->data[j]->key == keysDesc[k]) goto next; // пропускаем итерацию j, если указатель
+                                                                     // на ключ уже был отобран ранее
+                keysDesc[i] = map->data[j]->key;
+                maxValue = *map->data[j]->value;
+                next:
+                ;
+            }
+        }
+        printf("%5lu %s\n", maxValue, keysDesc[i]);
+        maxValue = 0;
     }
+    free(keysDesc);
 }
 
 int main(int argc, char **argv) {
     if (argc == 2) {
         Hashmap *map = countWords(argv[1]);
-        // mapIterate(map, printEntry, NULL);
         printDescending(map);
         destroyHashmap(&map);
     } else {
