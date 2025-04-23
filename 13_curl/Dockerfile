@@ -1,0 +1,48 @@
+FROM debian:stable-slim
+
+USER root
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
+    apt-get -y install \
+    wget \
+    unzip ca-certificates \
+    build-essential cmake git libssl-dev libpsl-dev \
+    && cd /tmp \
+    && git clone https://github.com/curl/curl.git \
+    && cd curl \
+    && git checkout curl-8_13_0 \
+    && cmake -D"CMAKE_INSTALL_PREFIX:PATH=/opt/curl" \
+    -D"BUILD_EXAMPLES:BOOL=OFF" -D"BUILD_LIBCURL_DOCS:BOOL=OFF" \
+    -D"BUILD_MISC_DOCS:BOOL=OFF" -D"BUILD_TESTING:BOOL=OFF" \
+    -D"ENABLE_UNIX_SOCKETS:BOOL=OFF" -D"USE_NGHTTP2:BOOL=OFF" \
+    -D"CURL_DISABLE_ALTSVC:BOOL=ON" -D"CURL_DISABLE_AWS:BOOL=ON"  \
+    -D"CURL_DISABLE_BASIC_AUTH:BOOL=OFF" \
+    -D"CURL_DISABLE_BEARER_AUTH:BOOL=OFF" -D"CURL_DISABLE_DOH:BOOL=ON" \
+    -D"CURL_DISABLE_FILE:BOOL=ON" -D"CURL_DISABLE_FORM_API:BOOL=ON" \
+    -D"CURL_DISABLE_FTP:BOOL=ON" -D"CURL_DISABLE_GETOPTIONS:BOOL=ON" \
+    -D"CURL_DISABLE_GOPHER:BOOL=ON" \
+    -D"CURL_DISABLE_HEADERS_API:BOOL=ON" \
+    -D"CURL_DISABLE_HSTS:BOOL=OFF" -D"CURL_DISABLE_HTTP:BOOL=OFF" \
+    -D"CURL_DISABLE_IMAP:BOOL=ON" -D"CURL_DISABLE_IPFS:BOOL=ON" \
+    -D"CURL_DISABLE_KERBEROS_AUTH:BOOL=ON" \
+    -D"CURL_DISABLE_LDAP:BOOL=ON" -D"CURL_DISABLE_LDAPS:BOOL=ON" \
+    -D"CURL_DISABLE_MQTT:BOOL=ON" \
+    -D"CURL_DISABLE_NEGOTIATE_AUTH:BOOL=ON" \
+    -D"CURL_DISABLE_NETRC:BOOL=ON" -D"CURL_DISABLE_NTLM:BOOL=ON" \
+    -D"CURL_DISABLE_PARSEDATE:BOOL=ON" -D"CURL_DISABLE_POP3:BOOL=ON" \
+    -D"CURL_DISABLE_PROXY:BOOL=ON" -D"CURL_DISABLE_RTSP:BOOL=ON" \
+    -D"CURL_DISABLE_SHA512_256:BOOL=ON" \
+    -D"CURL_DISABLE_SHUFFLE_DNS:BOOL=ON" -D"CURL_DISABLE_SMB:BOOL=ON" \
+    -D"CURL_DISABLE_SMTP:BOOL=ON" -D"CURL_DISABLE_SOCKETPAIR:BOOL=ON" \
+    -D"CURL_DISABLE_SRP:BOOL=ON" -D"CURL_DISABLE_TELNET:BOOL=OFF" \
+    -D"CURL_DISABLE_TFTP:BOOL=ON" \
+    -D"CURL_DISABLE_VERBOSE_STRINGS:BOOL=ON" \
+    -D"CURL_DISABLE_DICT:BOOL=ON" -D"CURL_DISABLE_WEBSOCKETS:BOOL=ON" \
+    && cmake --build . \
+    && make install \
+    && rm -rf /tmp/curl \
+    && apt-get purge -y build-essential cmake git wget unzip \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* 
+
+USER nobody
+ENV LD_LIBRARY_PATH=/opt/curl/lib
+ENTRYPOINT ["/opt/curl/bin/curl"]
