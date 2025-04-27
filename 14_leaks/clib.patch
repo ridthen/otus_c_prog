@@ -1,0 +1,210 @@
+diff -crB clib-orig/deps/http-get/http-get.c clib/deps/http-get/http-get.c
+*** clib-orig/deps/http-get/http-get.c	Tue Sep  8 03:51:24 2020
+--- clib/deps/http-get/http-get.c	Sun Apr 27 15:30:36 2025
+***************
+*** 89,98 ****
+  
+  int http_get_file_shared(const char *url, const char *file, CURLSH *share) {
+    CURL *req = curl_easy_init();
+!   if (!req) return -1;
+  
+    FILE *fp = fopen(file, "wb");
+!   if (!fp) return -1;
+  
+    if (share) {
+      curl_easy_setopt(req, CURLOPT_SHARE, share);
+--- 89,104 ----
+  
+  int http_get_file_shared(const char *url, const char *file, CURLSH *share) {
+    CURL *req = curl_easy_init();
+!   if (req == NULL) {
+!     curl_easy_cleanup(req);
+!     return -1;
+!   };
+  
+    FILE *fp = fopen(file, "wb");
+!   if (fp == NULL) {
+!     curl_easy_cleanup(req);
+!     return -1;
+!   }
+  
+    if (share) {
+      curl_easy_setopt(req, CURLOPT_SHARE, share);
+diff -crB clib-orig/src/common/clib-package.c clib/src/common/clib-package.c
+*** clib-orig/src/common/clib-package.c	Sat Feb  8 16:31:17 2025
+--- clib/src/common/clib-package.c	Sun Apr 27 15:28:52 2025
+***************
+*** 349,363 ****
+    list_node_t *node = NULL;
+    list_iterator_t *iterator = NULL;
+    int rc = -1;
+  
+!   if (!list || !dir)
+      goto cleanup;
+  
+    iterator = list_iterator_new(list, LIST_HEAD);
+    if (NULL == iterator)
+      goto cleanup;
+  
+!   list_t *freelist = list_new();
+  
+    while ((node = list_iterator_next(iterator))) {
+      clib_package_dependency_t *dep = NULL;
+--- 349,364 ----
+    list_node_t *node = NULL;
+    list_iterator_t *iterator = NULL;
+    int rc = -1;
++   list_t *freelist = NULL;
+  
+!   if (NULL == list || NULL == dir)
+      goto cleanup;
+  
+    iterator = list_iterator_new(list, LIST_HEAD);
+    if (NULL == iterator)
+      goto cleanup;
+  
+!   freelist = list_new();
+  
+    while ((node = list_iterator_next(iterator))) {
+      clib_package_dependency_t *dep = NULL;
+***************
+*** 396,409 ****
+  cleanup:
+    if (iterator)
+      list_iterator_destroy(iterator);
+!   iterator = list_iterator_new(freelist, LIST_HEAD);
+!   while ((node = list_iterator_next(iterator))) {
+!     clib_package_t *pkg = node->val;
+!     if (pkg)
+!       clib_package_free(pkg);
+    }
+-   list_iterator_destroy(iterator);
+-   list_destroy(freelist);
+    return rc;
+  }
+  
+--- 397,413 ----
+  cleanup:
+    if (iterator)
+      list_iterator_destroy(iterator);
+! 
+!   if (freelist) {
+!     iterator = list_iterator_new(freelist, LIST_HEAD);
+!     while ((node = list_iterator_next(iterator))) {
+!       clib_package_t *pkg = node->val;
+!       if (pkg)
+!         clib_package_free(pkg);
+!     }
+!     list_iterator_destroy(iterator);
+!     list_destroy(freelist);
+    }
+    return rc;
+  }
+  
+***************
+*** 660,665 ****
+--- 664,670 ----
+  #ifdef HAVE_PTHREADS
+        init_curl_share();
+        _debug("GET %s", json_url);
++       http_get_free(res);
+        res = http_get_shared(json_url, clib_package_curl_share);
+  #else
+        res = http_get(json_url);
+***************
+*** 928,944 ****
+  
+    if (0 == strncmp(file, "http", 4)) {
+      url = strdup(file);
+!   } else if (!(url = clib_package_file_url(pkg->url, file))) {
+      return 1;
+    }
+  
+    _debug("file URL: %s", url);
+  
+!   if (!(path = path_join(dir, basename(file)))) {
+      rc = 1;
+      goto cleanup;
+    }
+  
+  #ifdef HAVE_PTHREADS
+    pthread_mutex_lock(&lock.mutex);
+  #endif
+--- 933,961 ----
+  
+    if (0 == strncmp(file, "http", 4)) {
+      url = strdup(file);
+!   } else if ((url = clib_package_file_url(pkg->url, file)) == NULL) {
+!     free(url);
+      return 1;
+    }
+  
+    _debug("file URL: %s", url);
+  
+!   char *base_path = strdup(basename(file));
+! 
+!   if (!base_path) {
+      rc = 1;
+      goto cleanup;
+    }
+  
++   path = path_join(dir, base_path);
++ 
++   free(base_path);
++ 
++   if (!path) {
++     rc = 1;
++     goto cleanup;
++   }
++ 
+  #ifdef HAVE_PTHREADS
+    pthread_mutex_lock(&lock.mutex);
+  #endif
+***************
+*** 999,1011 ****
+  #ifdef HAVE_PTHREADS
+  static void *fetch_package_file_thread(void *arg) {
+    fetch_package_file_thread_data_t *data = arg;
+!   int *status = malloc(sizeof(int));
+!   int rc =
+        fetch_package_file_work(data->pkg, data->dir, data->file, data->verbose);
+!   *status = rc;
+    (void)data->pkg->refs--;
+!   pthread_exit((void *)status);
+!   return (void *)rc;
+  }
+  #endif
+  
+--- 1016,1028 ----
+  #ifdef HAVE_PTHREADS
+  static void *fetch_package_file_thread(void *arg) {
+    fetch_package_file_thread_data_t *data = arg;
+!   // int *status = malloc(sizeof(int));
+!   int status =
+        fetch_package_file_work(data->pkg, data->dir, data->file, data->verbose);
+!   // *status = rc;
+    (void)data->pkg->refs--;
+!   pthread_exit((void *)&status);
+!   return (void *)&status;
+  }
+  #endif
+  
+***************
+*** 1383,1389 ****
+  #ifdef HAVE_PTHREADS
+      pthread_mutex_lock(&lock.mutex);
+  #endif
+!     hash_set(visited_packages, strdup(pkg->name), "t");
+  #ifdef HAVE_PTHREADS
+      pthread_mutex_unlock(&lock.mutex);
+  #endif
+--- 1400,1408 ----
+  #ifdef HAVE_PTHREADS
+      pthread_mutex_lock(&lock.mutex);
+  #endif
+!     if (!hash_has(visited_packages, pkg->name)) {
+!       hash_set(visited_packages, strdup(pkg->name), "t");
+!     }
+  #ifdef HAVE_PTHREADS
+      pthread_mutex_unlock(&lock.mutex);
+  #endif
