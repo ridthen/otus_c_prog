@@ -157,9 +157,14 @@ static void apply_stress_constraint2(const Spectrum *spec, const WindForcing *wi
     if (!freq10 || !cinv10 || !dsii10 || !S_omni10 || !S_x10 || !S_y10 || !ucinv10 || !lfact10) {
         printf("Ошибка выделения памяти: freq10, cinv10, dsii10, S_omni10, S_x10, S_y10, ucinv10, lfact10\n");
         free(S_omni); free(S_x); free(S_y);
-        if (freq10) free(freq10); if (cinv10) free(cinv10); if (dsii10) free(dsii10);
-        if (S_omni10) free(S_omni10); if (S_x10) free(S_x10); if (S_y10) free(S_y10);
-        if (ucinv10) free(ucinv10); if (lfact10) free(lfact10);
+        if (freq10) free(freq10);
+        if (cinv10) free(cinv10);
+        if (dsii10) free(dsii10);
+        if (S_omni10) free(S_omni10);
+        if (S_x10) free(S_x10);
+        if (S_y10) free(S_y10);
+        if (ucinv10) free(ucinv10);
+        if (lfact10) free(lfact10);
         return;
     }
 

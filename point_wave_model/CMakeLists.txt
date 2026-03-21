@@ -25,6 +25,9 @@ set(SOURCES
 
 add_executable(point_wave_model ${SOURCES})
 
-target_link_libraries(point_wave_model PkgConfig::NETCDF)
+target_link_libraries(point_wave_model
+        PkgConfig::NETCDF
+        m
+)
 
 target_include_directories(point_wave_model PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
