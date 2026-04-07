@@ -147,7 +147,13 @@ static char* format_log_message(int level, const char *file, int line, const cha
     }
 
     char *result;
-    asprintf(&result, "%s [%s] %s:%d %s(): %s", time_buf, level_str, file, line, func, user_msg);
+    if (level == LOG_INFO)
+    {
+        asprintf(&result, "%s [%s] %s", time_buf, level_str, user_msg);
+    } else
+    {
+        asprintf(&result, "%s [%s] %s:%d %s(): %s", time_buf, level_str, file, line, func, user_msg);
+    }
     free(user_msg);
     return result;
 }
@@ -423,14 +429,22 @@ void logger_log(int level, const char *file, int line, const char *func,
         // Синхронная запись в общий файл
         pthread_mutex_lock(&common_mutex);
         if (common_file) {
-            fprintf(common_file, "%s", msg_text);
-            if (level == LOG_DEBUG) {
-                char *stack = get_stack_trace_string();
-                fprintf(common_file, "%s", stack);
-                free(stack);
+            if (level == LOG_INFO && common_file == stderr)
+            {
+                fprintf(stdout, "%s", msg_text);
+                if (strchr(msg_text, '\r') == NULL) fprintf(stdout, "\n"); // если нет возврата каретки
+                fflush(stdout);
+            } else
+            {
+                fprintf(common_file, "%s", msg_text);
+                if (level == LOG_DEBUG) {
+                    char *stack = get_stack_trace_string();
+                    fprintf(common_file, "%s", stack);
+                    free(stack);
+                }
+                fprintf(common_file, "\n");
+                fflush(common_file);
             }
-            fprintf(common_file, "\n");
-            fflush(common_file);
         }
         pthread_mutex_unlock(&common_mutex);
         free(msg_text);
