@@ -437,7 +437,7 @@ void logger_log(int level, const char *file, int line, const char *func,
             } else
             {
                 fprintf(common_file, "%s", msg_text);
-                if (level == LOG_DEBUG) {
+                if (current_level == LOG_DEBUG) {
                     char *stack = get_stack_trace_string();
                     fprintf(common_file, "%s", stack);
                     free(stack);
