@@ -7,6 +7,16 @@
 #include <execinfo.h>
 #include <unistd.h>
 
+
+#define error_c "error"
+#define ERROR_c "ERROR"
+#define warning_c "warning"
+#define WARNING_c "WARNING"
+#define info_c "info"
+#define INFO_c "INFO"
+#define debug_c "debug"
+#define DEBUG_c "DEBUG"
+
 #define MAX_ENV_PREFIX 64
 static char env_prefix[MAX_ENV_PREFIX] = "";
 
@@ -30,6 +40,7 @@ static int logging_enabled = 0;
 static int current_level = LOG_ERROR;
 static FILE *common_file = NULL;
 static pthread_mutex_t common_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t stack_trace_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static async_logger_t async_loggers[8];
 
@@ -84,10 +95,10 @@ static int is_valid_level(const int level) {
  */
 static int level_from_string(const char *str) {
     if (str == NULL) return LOG_ERROR;
-    if (strcasecmp(str, "error") == 0)   return LOG_ERROR;
-    if (strcasecmp(str, "warning") == 0) return LOG_WARNING;
-    if (strcasecmp(str, "info") == 0)    return LOG_INFO;
-    if (strcasecmp(str, "debug") == 0)   return LOG_DEBUG;
+    if (strcmp(str, error_c) == 0 || strcmp(str, ERROR_c) == 0)   return LOG_ERROR;
+    if (strcmp(str, warning_c) == 0 || strcmp(str, WARNING_c) == 0) return LOG_WARNING;
+    if (strcmp(str, info_c) == 0 || strcmp(str, INFO_c) == 0)    return LOG_INFO;
+    if (strcmp(str, debug_c) == 0 || strcmp(str, DEBUG_c) == 0)   return LOG_DEBUG;
     char *endptr;
     long val = strtol(str, &endptr, 10);
     if (*endptr == '\0' && is_valid_level((int)val))
@@ -143,15 +154,14 @@ static char* format_log_message(int level, const char *file, int line, const cha
     if (user_msg) {
         vsnprintf(user_msg, needed + 1, fmt, args);
     } else {
-        user_msg = strdup("<out of memory>");
+        perror("malloc");
+        return NULL;
     }
 
     char *result;
-    if (level == LOG_INFO)
-    {
+    if (level == LOG_INFO) {
         asprintf(&result, "%s [%s] %s", time_buf, level_str, user_msg);
-    } else
-    {
+    } else {
         asprintf(&result, "%s [%s] %s:%d %s(): %s", time_buf, level_str, file, line, func, user_msg);
     }
     free(user_msg);
@@ -167,22 +177,77 @@ static char* get_stack_trace_string(void) {
     void *buffer[100];
     int nptrs = backtrace(buffer, sizeof(buffer) / sizeof(buffer[0]));
     char **symbols = backtrace_symbols(buffer, nptrs);
-    if (!symbols) return strdup("Ошибка получения стека вызовов\n");
+    if (!symbols) {
+        perror("backtrace_symbols");
+        return NULL;
+    }
 
     size_t total_len = 0;
-    for (int i = 0; i < nptrs; ++i)
-        total_len += strlen(symbols[i]) + 2;
-    char *trace = malloc(total_len + 20);
+    total_len += snprintf(NULL, 0, "\nСтек вызовов:\n");
+    for (int i = 0; i < nptrs; ++i) {
+        total_len += snprintf(NULL, 0, "  %s\n", symbols[i]);
+    }
+    char *trace = malloc(total_len + 1);
     if (trace) {
         char *p = trace;
         p += sprintf(p, "\nСтек вызовов:\n");
-        for (int i = 0; i < nptrs; ++i)
+        for (int i = 0; i < nptrs; ++i) {
             p += sprintf(p, "  %s\n", symbols[i]);
+        }
+    } else {
+        perror("malloc");
+        free(symbols);
+        return NULL;
     }
     free(symbols);
-    return trace ? trace : strdup("Стек вызовов недоступен\n");
+    return trace;
 }
 
+/**
+ * Запись одного сообщения
+ * @param file
+ * @param level
+ * @param text
+ */
+static void write_single_log_message(FILE *file, int level, const char *text) {
+    if (!file || !text) return;
+    char *full_message = NULL;
+    // если нет отдельного файла, то пишем LOG_INFO в stdout
+    if (level == LOG_INFO && common_file == stderr) {
+        if (asprintf(&full_message, "%s%s", text,
+                 (strchr(text, '\r') == NULL) ? "\n" : "") == -1)
+            full_message = NULL;
+        if (full_message) {
+            fwrite(full_message, 1, strlen(full_message), stdout);
+            free(full_message);
+        }
+    } else {
+        if (current_level == LOG_DEBUG) {
+            pthread_mutex_lock(&stack_trace_mutex);
+            char *stack = get_stack_trace_string();
+            pthread_mutex_unlock(&stack_trace_mutex);
+
+            if (stack) {
+                if (asprintf(&full_message, "%s%s\n", text, stack) == -1)
+                    full_message = NULL;
+                free(stack);
+            } else {
+                if (asprintf(&full_message, "%s\n", text) == -1)
+                    full_message = NULL;
+            }
+        } else {
+            if (asprintf(&full_message, "%s\n", text) == -1)
+                full_message = NULL;
+        }
+        if (full_message) {
+            fwrite(full_message, 1, strlen(full_message), file);
+            fflush(file);
+            free(full_message);
+        } else {
+            perror("asprintf");
+        }
+    }
+}
 
 /**
  * Асинхронный поток-писатель
@@ -201,37 +266,21 @@ static void* async_writer_thread(void *arg) {
         logger->queue_head = msg->next;
         if (logger->queue_head == NULL)
             logger->queue_tail = NULL;
+
         pthread_mutex_unlock(&logger->mutex);
 
-        if (logger->file) {
-            fprintf(logger->file, "%s", msg->text);
-            if (logger->level == LOG_DEBUG) {
-                char *stack = get_stack_trace_string();
-                fprintf(logger->file, "%s", stack);
-                free(stack);
-            }
-            fprintf(logger->file, "\n");
-            fflush(logger->file);
-        }
+        write_single_log_message(logger->file, logger->level, msg->text);
         free(msg->text);
         free(msg);
 
         pthread_mutex_lock(&logger->mutex);
     }
 
+    // оставшиеся сообщения
     while (logger->queue_head) {
         log_message_t *msg = logger->queue_head;
         logger->queue_head = msg->next;
-        if (logger->file) {
-            fprintf(logger->file, "%s", msg->text);
-            if (logger->level == LOG_DEBUG) {
-                char *stack = get_stack_trace_string();
-                fprintf(logger->file, "%s", stack);
-                free(stack);
-            }
-            fprintf(logger->file, "\n");
-            fflush(logger->file);
-        }
+        write_single_log_message(logger->file, logger->level, msg->text);
         free(msg->text);
         free(msg);
     }
@@ -257,8 +306,13 @@ static int create_async_logger(int level, const char *filename) {
 
     logger->file = fopen(filename, "a");
     if (!logger->file) {
-        fprintf(stderr, "logger: невозможно открыть '%s' для уровня %d: %s, используя общий файл журнала\n",
-                filename, level, strerror(errno));
+        char *err_msg = NULL;
+        if (asprintf(&err_msg,
+                     "logger: невозможно открыть '%s' для уровня %d: %s, используя общий файл журнала\n",
+                     filename, level, strerror(errno)) != -1) {
+            fwrite(err_msg, 1, strlen(err_msg), stderr);
+            free(err_msg);
+        }
         return -1;
     }
 
@@ -306,8 +360,13 @@ static void do_init(void) {
     if (common_filename && common_filename[0] != '\0') {
         common_file = fopen(common_filename, "a");
         if (!common_file) {
-            fprintf(stderr, "logger: невозможно открыть LOG_FILE '%s': %s, будет использован stderr\n",
-                    common_filename, strerror(errno));
+            char *err_msg = NULL;
+            if (asprintf(&err_msg,
+                         "logger: невозможно открыть LOG_FILE '%s': %s, будет использован stderr\n",
+                         common_filename, strerror(errno)) != -1) {
+                fwrite(err_msg, 1, strlen(err_msg), stderr);
+                free(err_msg);
+            }
             common_file = stderr;
         }
     } else {
@@ -389,6 +448,29 @@ void logger_shutdown(void) {
 }
 
 
+void async_logger_enqueue(int level, char* msg_text) {
+    async_logger_t *logger = &async_loggers[level];
+    pthread_mutex_lock(&logger->mutex);
+    log_message_t *msg = malloc(sizeof(log_message_t));
+    if (msg) {
+        msg->text = msg_text;
+        msg->next = NULL;
+        if (logger->queue_tail) {
+            logger->queue_tail->next = msg;
+            logger->queue_tail = msg;
+        } else {
+            logger->queue_head = logger->queue_tail = msg;
+        }
+        pthread_cond_signal(&logger->cond);
+        pthread_mutex_unlock(&logger->mutex);
+    } else {
+        perror("malloc");
+        free(msg_text);
+        pthread_mutex_unlock(&logger->mutex);
+    }
+}
+
+
 void logger_log(int level, const char *file, int line, const char *func,
                 const char *fmt, ...) {
     if (!initialized) {
@@ -408,43 +490,12 @@ void logger_log(int level, const char *file, int line, const char *func,
 
     // Если для уровня есть асинхронный логгер и файл открыт
     if (level >= 0 && level < 8 && async_loggers[level].file) {
-        async_logger_t *logger = &async_loggers[level];
-        log_message_t *msg = malloc(sizeof(log_message_t));
-        if (msg) {
-            msg->text = msg_text;
-            msg->next = NULL;
-            pthread_mutex_lock(&logger->mutex);
-            if (logger->queue_tail) {
-                logger->queue_tail->next = msg;
-                logger->queue_tail = msg;
-            } else {
-                logger->queue_head = logger->queue_tail = msg;
-            }
-            pthread_cond_signal(&logger->cond);
-            pthread_mutex_unlock(&logger->mutex);
-        } else {
-            free(msg_text);
-        }
+        async_logger_enqueue(level, msg_text);
     } else {
         // Синхронная запись в общий файл
         pthread_mutex_lock(&common_mutex);
         if (common_file) {
-            if (level == LOG_INFO && common_file == stderr)
-            {
-                fprintf(stdout, "%s", msg_text);
-                if (strchr(msg_text, '\r') == NULL) fprintf(stdout, "\n"); // если нет возврата каретки
-                fflush(stdout);
-            } else
-            {
-                fprintf(common_file, "%s", msg_text);
-                if (current_level == LOG_DEBUG) {
-                    char *stack = get_stack_trace_string();
-                    fprintf(common_file, "%s", stack);
-                    free(stack);
-                }
-                fprintf(common_file, "\n");
-                fflush(common_file);
-            }
+            write_single_log_message(common_file, level, msg_text);
         }
         pthread_mutex_unlock(&common_mutex);
         free(msg_text);

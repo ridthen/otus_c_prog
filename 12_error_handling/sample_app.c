@@ -39,6 +39,7 @@ int main(void) {
     logger_set_env_prefix("MYAPP_");
     setenv("MYAPP_LOGGING_ENABLED", "1", 1);
     setenv("MYAPP_LOG_LEVEL", "debug", 1);
+    setenv("MYAPP_DEBUG_LOG_FILE", "debug.log", 1);
     // setenv("MYAPP_LOG_FILE", "myapp.log", 1);
     // setenv("MYAPP_DEBUG_LOG_FILE", "debug.log", 1);
     // log_debug("Это debug сообщение запишется в debug.log");
