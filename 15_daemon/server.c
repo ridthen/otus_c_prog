@@ -9,12 +9,10 @@
 #include <errno.h>
 #include <signal.h>
 
-static volatile int keep_running = 1;
+static volatile sig_atomic_t keep_running = 1;
 static char *g_socket_path = NULL;
 
-static void signal_handler(int sig) {
-    // заглушка
-    (void)sig;
+static void signal_handler(int sig __attribute__((unused))) {
     keep_running = 0;
 }
 
@@ -28,10 +26,10 @@ int run_server(const char *socket_path, const char *file_path) {
     g_socket_path = strdup(socket_path);
     if (!g_socket_path) {
         perror("strdup");
-        return -1;
+        goto except;
     }
 
-    struct sigaction sa;
+    struct sigaction sa = {0};
     sa.sa_handler = signal_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
@@ -41,13 +39,12 @@ int run_server(const char *socket_path, const char *file_path) {
     int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (server_fd == -1) {
         perror("socket");
-        free(g_socket_path);
-        return -1;
+        goto except;
     }
 
     unlink(socket_path);
 
-    struct sockaddr_un addr;
+    struct sockaddr_un addr = {0};
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
@@ -55,16 +52,14 @@ int run_server(const char *socket_path, const char *file_path) {
     if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
         perror("bind");
         close(server_fd);
-        free(g_socket_path);
-        return -1;
+        goto except;
     }
 
     if (listen(server_fd, 5) == -1) {
         perror("listen");
         close(server_fd);
         unlink(socket_path);
-        free(g_socket_path);
-        return -1;
+        goto except;
     }
 
     atexit(cleanup_socket);
@@ -76,7 +71,7 @@ int run_server(const char *socket_path, const char *file_path) {
             continue;
         }
 
-        struct stat st;
+        struct stat st = {0};
         char response[256];
         if (stat(file_path, &st) == 0) {
             snprintf(response, sizeof(response), "%lld\n", st.st_size);
@@ -92,5 +87,10 @@ int run_server(const char *socket_path, const char *file_path) {
     unlink(socket_path);
     free(g_socket_path);
     return 0;
+
+except:
+    if (g_socket_path)
+        free(g_socket_path);
+    return -1;
 }
 

@@ -4,6 +4,7 @@
 struct config {
     char *file_path;
     char *socket_path;
+    char *pid_path;
 };
 
 /**

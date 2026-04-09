@@ -25,6 +25,7 @@ struct config *load_config(const char *filename) {
 
     int in_file_path = 0;
     int in_socket_path = 0;
+    int in_pid_path = 0;
     int done = 0;
 
     while (!done) {
@@ -44,10 +45,15 @@ struct config *load_config(const char *filename) {
                 } else if (in_socket_path) {
                     cfg->socket_path = strdup((char *)event.data.scalar.value);
                     in_socket_path = 0;
+                } else if (in_pid_path) {
+                    cfg->pid_path = strdup((char *)event.data.scalar.value);
+                    in_pid_path = 0;
                 } else if (strcmp((char *)event.data.scalar.value, "file_path") == 0) {
                     in_file_path = 1;
                 } else if (strcmp((char *)event.data.scalar.value, "socket_path") == 0) {
                     in_socket_path = 1;
+                } else if (strcmp((char *)event.data.scalar.value, "pid_path") == 0) {
+                    in_pid_path = 1;
                 }
                 break;
             case YAML_STREAM_END_EVENT:
@@ -62,8 +68,8 @@ struct config *load_config(const char *filename) {
     yaml_parser_delete(&parser);
     fclose(fh);
 
-    if (cfg && (!cfg->file_path || !cfg->socket_path)) {
-        fprintf(stderr, "В конфигурации отсутствует file_path или socket_path\n");
+    if (cfg && (!cfg->file_path || !cfg->socket_path || !cfg->pid_path)) {
+        fprintf(stderr, "В конфигурации отсутствует file_path, pid_path или socket_path\n");
         free_config(cfg);
         cfg = NULL;
     }
@@ -74,6 +80,7 @@ void free_config(struct config *cfg) {
     if (cfg) {
         free(cfg->file_path);
         free(cfg->socket_path);
+        free(cfg->pid_path);
         free(cfg);
     }
 }
