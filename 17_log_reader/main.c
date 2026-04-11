@@ -5,6 +5,9 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <ctype.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <getopt.h>
 
 #define MAX_LINE_LEN 8192
 #define HASH_SIZE 1024
@@ -12,14 +15,14 @@
 
 typedef struct UrlEntry {
     char *key;
-    long long bytes;
+    size_t bytes;
     struct UrlEntry *next;
 } UrlEntry;
 
 typedef struct {
+    pthread_mutex_t mutex;
     UrlEntry **buckets;
     size_t size;
-    pthread_mutex_t mutex;
 } UrlMap;
 
 typedef struct RefEntry {
@@ -29,24 +32,29 @@ typedef struct RefEntry {
 } RefEntry;
 
 typedef struct {
+    pthread_mutex_t mutex;
     RefEntry **buckets;
     size_t size;
-    pthread_mutex_t mutex;
 } RefMap;
 
 typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
     char **files;
     int count;
     int next;
     int finished;
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
 } FileQueue;
 
 static UrlMap url_map;
 static RefMap ref_map;
-static long long total_bytes = 0;
+static size_t total_bytes = 0;
 static pthread_mutex_t total_bytes_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+
+void cleanup(void) {
+    printf("[INFO] Освобождаются выделенные ресурсы\n");
+}
 
 static unsigned long hash(const char *str) {
     unsigned long h = 5381;
@@ -76,7 +84,7 @@ static void ref_map_init(RefMap *map, size_t size) {
     pthread_mutex_init(&map->mutex, NULL);
 }
 
-static void url_map_add(UrlMap *map, const char *key, long long bytes) {
+static void url_map_add(UrlMap *map, const char *key, size_t bytes) {
     if (!key || bytes == 0) return;
     unsigned long h = hash(key) % map->size;
     pthread_mutex_lock(&map->mutex);
@@ -175,21 +183,21 @@ static void ref_map_free(RefMap *map) {
  * @param name
  * @return
  */
-static int is_log_file(const char *name) {
+static bool is_log_file(const char *name) {
     const char *logpos = strstr(name, ".log");
-    if (!logpos) return 0;
+    if (!logpos) return false;
     const char *after = logpos + 4;
-    if (*after == '\0') return 1;
+    if (*after == '\0') return true;
     if (*after == '.') {
         const char *p = after + 1;
-        if (*p == '\0') return 0;
+        if (*p == '\0') return false;
         while (*p) {
-            if (!isdigit(*p)) return 0;
+            if (!isdigit(*p)) return false;
             p++;
         }
-        return 1;
+        return true;
     }
-    return 0;
+    return false;
 }
 
 /**
@@ -210,49 +218,50 @@ static const char *skip_spaces(const char *p) {
  * @param referer
  * @return
  */
-static int parse_log_line(const char *line, char **url, long long *bytes, char **referer) {
+static int parse_log_line(const char *line, char **url, size_t *bytes,
+    char **referer) {
     const char *p = line;
 
-    // Пропуск IP
+    /* Пропуск IP */
     p = strchr(p, ' ');
     if (!p) return 0;
     p++;
 
-    // Пропуск идентификатора
+    /* Пропуск идентификатора */
     p = strchr(p, ' ');
     if (!p) return 0;
     p++;
 
-    // Пропуск userid
+    /* Пропуск userid */
     p = strchr(p, '[');
     if (!p) return 0;
     p = strchr(p, '"');
     if (!p) return 0;
     p++;
 
-    // Метод
+    /* Метод */
     const char *method_end = strchr(p, ' ');
     if (!method_end) return 0;
 
-    // URI
+    /* URI */
     const char *url_start = method_end + 1;
     const char *url_end = strchr(url_start, ' ');
     if (!url_end) return 0;
     size_t url_len = url_end - url_start;
 
-    // Версия протокола
+    /* Версия протокола */
     p = strchr(url_end, '"');
     if (!p) return 0;
     p++;
 
-    // Код ответа
+    /* Код ответа */
     p = skip_spaces(p);
     if (!isdigit(*p)) return 0;
     p = strchr(p, ' ');
     if (!p) return 0;
-    p++; // перед размером ответа
+    p++; /* перед размером ответа */
 
-    // Размер ответа
+    /* Размер ответа */
     p = skip_spaces(p);
     if (*p == '-') {
         *bytes = 0;
@@ -260,10 +269,10 @@ static int parse_log_line(const char *line, char **url, long long *bytes, char *
         *bytes = atoll(p);
     }
 
-    // Referer
+    /* Referer */
     p = strchr(p, '"');
     if (!p) return 0;
-    p++; // внутри кавычек Referer
+    p++; /* внутри кавычек Referer */
     const char *ref_start = p;
     const char *ref_end = strchr(p, '"');
     if (!ref_end) return 0;
@@ -305,14 +314,18 @@ static char *url_decode(const char *src) {
     }
     char *out = dst;
     for (size_t i = 0; i < len; i++) {
-        if (src[i] == '%' && i + 2 < len && isxdigit(src[i+1]) && isxdigit(src[i+2])) {
+        if (src[i] == '%' && i + 2 < len && isxdigit(src[i+1])
+            && isxdigit(src[i+2])) {
             char hex[3] = { src[i+1], src[i+2], '\0' };
-            *out++ = (char)strtol(hex, NULL, 16);
+            *out = (char)strtol(hex, NULL, 16);
+            out++;
             i += 2;
         } else if (src[i] == '+') {
-            *out++ = ' ';
+            *out = ' ';
+            out++;
         } else {
-            *out++ = src[i];
+            *out = src[i];
+            out++;
         }
     }
     *out = '\0';
@@ -361,8 +374,10 @@ static char **list_files(const char *dir_path, int *count) {
                 }
                 files = tmp;
             }
-            if (files)
-                files[n++] = fullpath;
+            if (files) {
+                files[n] = fullpath;
+                n++;
+            }
         } else {
             free(fullpath);
         }
@@ -388,7 +403,8 @@ static void *worker(void *arg) {
             pthread_mutex_unlock(&q->mutex);
             break;
         }
-        int idx = q->next++;
+        int idx = q->next;
+        q->next++;
         if (idx == q->count - 1) {
             q->finished = 1;
             pthread_cond_broadcast(&q->cond);
@@ -404,7 +420,7 @@ static void *worker(void *arg) {
         char line[MAX_LINE_LEN];
         while (fgets(line, sizeof(line), f)) {
             char *url = NULL;
-            long long bytes = 0;
+            size_t bytes = 0;
             char *referer = NULL;
             if (parse_log_line(line, &url, &bytes, &referer)) {
                 if (bytes > 0) {
@@ -463,7 +479,8 @@ static UrlEntry **collect_urls(int *out_count) {
                 return NULL;
             }
             arr = tmp;
-            arr[cnt++] = e;
+            arr[cnt] = e;
+            cnt++;
             e = e->next;
         }
     }
@@ -492,7 +509,8 @@ static RefEntry **collect_refs(int *out_count) {
                 return NULL;
             }
             arr = tmp;
-            arr[cnt++] = e;
+            arr[cnt] = e;
+            cnt++;
             e = e->next;
         }
     }
@@ -502,20 +520,58 @@ static RefEntry **collect_refs(int *out_count) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        fprintf(stderr, "Использование: %s <директория логов> <число тредов>\n", argv[0]);
-        return 1;
+    if (atexit(cleanup) != 0) {
+        fprintf(stderr, "Ошибка регистрации функции освобождения ресурсов\n");
+        return EXIT_FAILURE;
     }
-    const char *dir_path = argv[1];
-    int num_threads = atoi(argv[2]);
-    if (num_threads <= 0) num_threads = 1;
+
+    const char *dir_path = NULL;
+    long num_threads_l = 1;
+    int opt;
+
+    while ((opt = getopt(argc, argv, "d:t:")) != -1) {
+        switch (opt) {
+        case 'd':
+            dir_path = optarg;
+            break;
+        case 't': {
+            char *endptr;
+            errno = 0;
+            long val = strtol(optarg, &endptr, 10);
+            if (errno != 0 || *endptr != '\0' || val <= 0) {
+                fprintf(stderr, "Ошибка: неверное число потоков '%s'\n",
+                    optarg);
+                exit(EXIT_FAILURE);
+            }
+            num_threads_l = val;
+            break;
+        }
+        default:
+            fprintf(stderr, "Использование: %s -d <директория логов>"
+                            " -t <число тредов>\n",
+                argv[0]);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    if (!dir_path) {
+        fprintf(stderr, "Ошибка: не указана директория\n");
+        fprintf(stderr, "Использование: %s -d <директория логов>"
+                        " -t <число тредов>\n",
+            argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    int num_threads = (int)num_threads_l;
 
     int file_count = 0;
     char **files = list_files(dir_path, &file_count);
     if (!files) {
-        fprintf(stderr, "Невозможно прочитать директорию или в ней нет *.log-файлов\n");
+        fprintf(stderr, "Невозможно прочитать директорию"
+                        " или в ней нет *.log-файлов\n");
         file_count = 0;
     }
+
 
     url_map_init(&url_map, HASH_SIZE);
     ref_map_init(&ref_map, HASH_SIZE);
@@ -548,7 +604,7 @@ int main(int argc, char *argv[]) {
         pthread_join(threads[i], NULL);
     free(threads);
 
-    printf("Всего байт: %lld\n", total_bytes);
+    printf("Всего байт: %lu\n", total_bytes);
 
     int url_cnt = 0;
     UrlEntry **urls = collect_urls(&url_cnt);
@@ -557,7 +613,8 @@ int main(int argc, char *argv[]) {
         printf("\nТоп %d URI по трафику:\n", TOP_N);
         for (int i = 0; i < TOP_N && i < url_cnt; i++) {
             char *decoded = url_decode(urls[i]->key);
-            printf("%lld %s\n", urls[i]->bytes, decoded ? decoded : urls[i]->key);
+            printf("%lu %s\n", urls[i]->bytes,
+                decoded ? decoded : urls[i]->key);
             if (decoded)
                 free(decoded);
         }
@@ -588,5 +645,5 @@ int main(int argc, char *argv[]) {
     url_map_free(&url_map);
     ref_map_free(&ref_map);
 
-    return 0;
+    exit(EXIT_SUCCESS);
 }
