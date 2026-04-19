@@ -1,0 +1,31 @@
+services:
+  db_server:
+    image: mariadb:10.11
+    container_name: mariadb_server
+    restart: always
+    user: 1000:1000
+    environment:
+      - MYSQL_ROOT_PASSWORD=rootpasswd
+      - MYSQL_USER=ap
+      - MYSQL_PASSWORD=appasswd
+      - MARIADB_PASSWORD=appasswd
+      - MYSQL_DATABASE=movies
+      - MARIADB_AUTO_UPGRADE=1
+    command: ["--max-allowed-packet=128M", "--innodb-log-file-size=64M", "--innodb-file-per-table=1", "--innodb-file-format=Barracuda", "--innodb-large-prefix=on", "--innodb-default-row-format=dynamic"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-u", "root", "--password=rootpasswd"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - ./data:/var/lib/mysql
+      - ./db_dumps:/docker-entrypoint-initdb.d
+
+  db_client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: db_client
+    depends_on:
+      - db_server
+    entrypoint: bash -c "sleep 5 && /app/29_dbstat -h mariadb_server -u ap -p appasswd -d movies -t oscar -c age"
