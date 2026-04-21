@@ -48,16 +48,14 @@ static void Draw(void) {
 }
 
 
-static void Keyboard(unsigned char key, int x, int y) {
-    (void)x;
-    (void)y;
+static void Keyboard(unsigned char key, int x __attribute__((unused)),
+    int y __attribute__((unused))) {
     if (key == 27)   /* Esc */
         exit(EXIT_SUCCESS);
 }
 
 
-static void Timer(int value) {
-    (void)value;
+static void Timer(int value __attribute__((unused))) {
     angle += 2.0f; /* скорость вращения */
     if (angle >= 360.0f)
         angle -= 360.0f;
