@@ -45,66 +45,83 @@ static bool is_valid_identifier(const char *s)
     return true;
 }
 
-int main(int argc, char *argv[])
-{
-    if (atexit(cleanup) != 0) {
-        perror("atexit");
-        return EXIT_FAILURE;
-    }
+typedef struct {
+    const char *host;
+    const char *user;
+    const char *pass;
+    const char *db;
+    const char *table;
+    const char *column;
+} arguments_t;
 
-    const char *host = "localhost";
-    const char *user = "root";
-    const char *pass = "my-secret-pw";
-    const char *db = NULL;
-    const char *table = NULL;
-    const char *column = NULL;
+static int parse_arguments(int argc, char *argv[], arguments_t *args)
+{
+    args->host = "localhost";
+    args->user = "root";
+    args->pass = "my-secret-pw";
+    args->db = NULL;
+    args->table = NULL;
+    args->column = NULL;
 
     int opt;
     while ((opt = getopt(argc, argv, "h:u:p:d:t:c:")) != -1) {
         switch (opt) {
-        case 'h': host = optarg; break;
-        case 'u': user = optarg; break;
-        case 'p': pass = optarg; break;
-        case 'd': db = optarg; break;
-        case 't': table = optarg; break;
-        case 'c': column = optarg; break;
+        case 'h': args->host = optarg; break;
+        case 'u': args->user = optarg; break;
+        case 'p': args->pass = optarg; break;
+        case 'd': args->db = optarg; break;
+        case 't': args->table = optarg; break;
+        case 'c': args->column = optarg; break;
         default:
             fputs("Использование: dbstat -d база -t таблица -c колонка "
                   "[-h хост] [-u пользователь] [-p пароль]\n", stderr);
-            return EXIT_FAILURE;
+            return -1;
         }
     }
 
-    if (!db || !table || !column) {
+    if (!args->db || !args->table || !args->column) {
         fputs("Ошибка: необходимо указать базу данных, таблицу и колонку\n",
-            stderr);
-        return EXIT_FAILURE;
+              stderr);
+        return -1;
     }
 
-    if (!is_valid_identifier(db) || !is_valid_identifier(table)
-        || !is_valid_identifier(column)) {
+    return 0;
+}
+
+static int validate_identifiers(const arguments_t *args)
+{
+    if (!is_valid_identifier(args->db) || !is_valid_identifier(args->table)
+        || !is_valid_identifier(args->column)) {
         fputs("Ошибка: имя базы, таблицы или колонки содержит"
               " недопустимые символы\n", stderr);
-        return EXIT_FAILURE;
+        return -1;
     }
+    return 0;
+}
 
+static int db_connect(const arguments_t *args)
+{
     conn = mysql_init(NULL);
     if (!conn) {
         perror("mysql_init");
-        return EXIT_FAILURE;
+        return -1;
     }
 
-    if (!mysql_real_connect(conn, host, user, pass, db, 0,
-        NULL, 0)) {
+    if (!mysql_real_connect(conn, args->host, args->user, args->pass,
+                            args->db, 0, NULL, 0)) {
         finish_with_error();
     }
+    return 0;
+}
 
+static int execute_query(const arguments_t *args)
+{
     char query[512] = {0};
     int needed = snprintf(query, sizeof(query),
-                         "SELECT `%s` FROM `%s`", column, table);
+                         "SELECT `%s` FROM `%s`", args->column, args->table);
     if (needed < 0 || (size_t)needed >= sizeof(query)) {
         fputs("Ошибка: буфер запроса недостаточен\n", stderr);
-        exit(EXIT_FAILURE);
+        return -1;
     }
 
     if (mysql_query(conn, query)) {
@@ -119,22 +136,34 @@ int main(int argc, char *argv[])
     unsigned int num_fields = mysql_num_fields(result);
     if (num_fields != 1) {
         fputs("Ошибка: ожидалась ровно одна колонка в результате\n", stderr);
-        exit(EXIT_FAILURE);
+        return -1;
     }
 
-    size_t count = 0;
-    size_t skipped = 0;
-    double sum = 0.0;
-    double sum_sq = 0.0;
-    double min = 0.0;
-    double max = 0.0;
+    return 0;
+}
+
+typedef struct {
+    size_t count;
+    size_t skipped;
+    double sum;
+    double sum_sq;
+    double min;
+    double max;
+} stats_t;
+
+static int process_rows(stats_t *stats)
+{
+    stats->count = 0;
+    stats->skipped = 0;
+    stats->sum = 0.0;
+    stats->sum_sq = 0.0;
     bool first = true;
 
     MYSQL_ROW row;
     while ((row = mysql_fetch_row(result))) {
         const char *val = row[0];
         if (!val) {
-            ++skipped;
+            ++stats->skipped;
             continue;
         }
 
@@ -142,43 +171,80 @@ int main(int argc, char *argv[])
         errno = 0;
         double d = strtod(val, &endptr);
         if (errno == ERANGE) {
-            ++skipped;
+            ++stats->skipped;
             continue;
         }
         if (endptr == val || *endptr != '\0') {
-            ++skipped;
+            ++stats->skipped;
             continue;
         }
 
         if (first) {
-            min = max = d;
+            stats->min = stats->max = d;
             first = false;
         } else {
-            if (d < min) min = d;
-            if (d > max) max = d;
+            if (d < stats->min) stats->min = d;
+            if (d > stats->max) stats->max = d;
         }
-        sum += d;
-        sum_sq += d * d;
-        ++count;
+        stats->sum += d;
+        stats->sum_sq += d * d;
+        ++stats->count;
     }
 
-    if (count == 0) {
+    if (stats->count == 0) {
         fputs("В указанной колонке не найдено числовых значений\n", stderr);
-        exit(EXIT_FAILURE);
+        return -1;
     }
 
-    double mean = sum / count;
-    double variance = (sum_sq / count) - (mean * mean);
+    return 0;
+}
 
-    printf("Количество обработанных числовых значений: %zu\n", count);
-    if (skipped > 0) {
-        printf("Пропущено нечисловых (или NULL) значений: %zu\n", skipped);
+static void print_statistics(const stats_t *stats)
+{
+    double mean = stats->sum / stats->count;
+    double variance = (stats->sum_sq / stats->count) - (mean * mean);
+
+    printf("Количество обработанных числовых значений: %zu\n", stats->count);
+    if (stats->skipped > 0) {
+        printf("Пропущено нечисловых (или NULL) значений: %zu\n", stats->skipped);
     }
-    printf("Сумма:    %g\n", sum);
+    printf("Сумма:    %g\n", stats->sum);
     printf("Среднее:  %g\n", mean);
-    printf("Минимум:  %g\n", min);
-    printf("Максимум: %g\n", max);
+    printf("Минимум:  %g\n", stats->min);
+    printf("Максимум: %g\n", stats->max);
     printf("Дисперсия: %g\n", variance);
+}
+
+int main(int argc, char *argv[])
+{
+    if (atexit(cleanup) != 0) {
+        perror("atexit");
+        goto error;
+    }
+
+    arguments_t args;
+    if (parse_arguments(argc, argv, &args) != 0) {
+        goto error;
+    }
+
+    if (validate_identifiers(&args) != 0) {
+        goto error;
+    }
+
+    if (db_connect(&args) != 0) {
+        goto error;
+    }
+
+    if (execute_query(&args) != 0) {
+        goto error;
+    }
+
+    stats_t stats;
+    if (process_rows(&stats) != 0) {
+        goto error;
+    }
+
+    print_statistics(&stats);
 
     mysql_free_result(result);
     result = NULL;
@@ -186,4 +252,6 @@ int main(int argc, char *argv[])
     conn = NULL;
 
     return EXIT_SUCCESS;
+error:
+    return EXIT_FAILURE;
 }
