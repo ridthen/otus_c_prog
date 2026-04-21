@@ -78,11 +78,13 @@ static void die(const char *msg) {
  * Установка неблокирующего режима на сокете
  * @param fd
  */
-static void set_nonblocking(int fd) {
+static int set_nonblocking(int fd) {
     const int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) die("fcntl F_GETFL");
+    if (flags == -1)
+        return -1;
     if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1)
-        die("fcntl F_SETFL");
+        return -1;
+    return 0;
 }
 
 /**
@@ -91,24 +93,28 @@ static void set_nonblocking(int fd) {
  * @param filter
  * @param udata
  */
-static void add_kqueue_event(int fd, int filter, void *udata) {
+static int add_kqueue_event(int fd, int filter, void *udata) {
     struct kevent ev = {0};
     EV_SET(&ev, fd, filter, EV_ADD | EV_ENABLE, 0, 0, udata);
     if (kevent(server.kq, &ev, 1, NULL, 0, NULL) == -1)
-        die("kevent add");
+        return -1;
+    return 0;
 }
 
-static void mod_kqueue_event(int fd, int filter, void *udata) {
+static int mod_kqueue_event(int fd, int filter, void *udata) {
     struct kevent ev = {0};
     EV_SET(&ev, fd, filter, EV_ADD | EV_ENABLE, 0, 0, udata);
     if (kevent(server.kq, &ev, 1, NULL, 0, NULL) == -1)
-        die("kevent mod");
+        return -1;
+    return 0;
 }
 
-static void del_kqueue_event(int fd, int filter) {
+static int del_kqueue_event(int fd, int filter) {
     struct kevent ev = {0};
     EV_SET(&ev, fd, filter, EV_DELETE, 0, 0, NULL);
-    kevent(server.kq, &ev, 1, NULL, 0, NULL);
+    if (kevent(server.kq, &ev, 1, NULL, 0, NULL) == -1)
+        return -1;
+    return 0;
 }
 
 /**
@@ -149,23 +155,29 @@ static const char *get_mime_type(const char *path) {
 
 static void url_decode(char *dst, const char *src, size_t dst_size) {
     char *d = dst;
-    const char *s = src;
-    while (*s && d - dst < (ptrdiff_t)dst_size - 1) {
-        if (*s == '%' && s[1] && s[2]) {
-            char hex[3] = {s[1], s[2], '\0'};
-            char *end;
+    const char *ptr = src;
+    while (*ptr && d - dst < (ptrdiff_t)dst_size - 1) {
+        if (*ptr == '%' && ptr[1] != '\0' && ptr[2] != '\0') {
+            char hex[3] = {0};
+            strlcpy(hex, ptr + 1, sizeof(hex));
+            char *end = NULL;
+            errno = 0;
             long val = strtol(hex, &end, 16);
-            if (end == hex + 2) {
-                *d++ = (char)val;
-                s += 3;
+            if (errno == 0 && end == hex + 2 && val >= 0 && val <= 255) {
+                *d = (char)val;
+                d++;
+                ptr += 3;
                 continue;
             }
-        } else if (*s == '+') {
-            *d++ = ' ';
-            s++;
+        } else if (*ptr == '+') {
+            *d = ' ';
+            d++;
+            ptr++;
             continue;
         }
-        *d++ = *s++;
+        *d = *ptr;
+        d++;
+        ptr++;
     }
     *d = '\0';
 }
@@ -197,7 +209,10 @@ static void send_error(struct connection *conn, int code, const char *status) {
         memcpy(conn->send_buf + conn->send_len, body, body_len);
         conn->send_len += body_len;
     }
-    mod_kqueue_event(conn->fd, EVFILT_WRITE, conn);
+    if (mod_kqueue_event(conn->fd, EVFILT_WRITE, conn) == -1) {
+        /* Не удалось зарегистрировать событие — закрываем соединение */
+        close_connection(conn);
+    }
 }
 
 static void handle_request(struct connection *conn) {
@@ -265,7 +280,9 @@ static void handle_request(struct connection *conn) {
     conn->file_size = st.st_size;
     build_http_status(conn, 200, "OK", get_mime_type(full_path),
         st.st_size);
-    mod_kqueue_event(conn->fd, EVFILT_WRITE, conn);
+    if (mod_kqueue_event(conn->fd, EVFILT_WRITE, conn) == -1) {
+        close_connection(conn);
+    }
 }
 
 static void handle_read(struct connection *conn) {
@@ -388,7 +405,10 @@ static void accept_connection(void) {
     }
 
     /* неблокирующий режим на клиенте */
-    set_nonblocking(client_fd);
+    if (set_nonblocking(client_fd) == -1) {
+        close(client_fd);
+        return;
+    }
 
     struct connection *conn = &server.conns[server.nconns];
     server.nconns++;
@@ -397,10 +417,13 @@ static void accept_connection(void) {
     conn->state = STATE_READING;
     conn->file_fd = -1;
 
-    add_kqueue_event(client_fd, EVFILT_READ, conn);
+    if (add_kqueue_event(client_fd, EVFILT_READ, conn) == -1) {
+        close(client_fd);
+        server.nconns--;
+    }
 }
 
-static void parse_args(int argc, char *argv[]) {
+static int parse_args(int argc, char *argv[]) {
     int opt;
     while ((opt = getopt(argc, argv, "d:l:")) != -1) {
         switch (opt) {
@@ -413,50 +436,81 @@ static void parse_args(int argc, char *argv[]) {
             default:
                 fprintf(stderr, "Использование: %s -d <директория>"
                                 " -l <адрес:порт>\n", argv[0]);
-                exit(EXIT_FAILURE);
+                goto error;
         }
     }
     if (!server.root_dir || !server.listen_addr) {
         fprintf(stderr, "Отсутствуют необходимые аргументы\n");
-        exit(EXIT_FAILURE);
+        goto error;
     }
+    return 0;
+error:
+    return -1;
 }
 
-static void setup_listen_socket(void) {
-    char addr_str[64];
-    memset(addr_str, 0, sizeof(addr_str));
-    strncpy(addr_str, server.listen_addr, sizeof(addr_str) - 1);
-    addr_str[sizeof(addr_str) - 1] = '\0';
+static int setup_listen_socket(void) {
+    char addr_str[64] = {0};
+    strlcpy(addr_str, server.listen_addr, sizeof(addr_str));
 
     char *colon = strrchr(addr_str, ':');
-    if (!colon) die("Неверный формат адреса. Ожидается адрес:порт");
+    if (!colon) {
+        fprintf(stderr, "Неверный формат адреса. Ожидается адрес:порт\n");
+        goto error;
+    }
     *colon = '\0';
     const char* port_str = colon + 1;
 
     char *end;
     long port = strtol(port_str, &end, 10);
-    if (*end != '\0' || port <= 0 || port > 65535) die("Неверный порт");
+    if (*end != '\0' || port <= 0 || port > 65535) {
+        fprintf(stderr, "Неверный порт\n");
+        goto error;
+    }
 
     /* Создание сокета сервера */
     server.listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server.listen_fd == -1) die("socket");
+    if (server.listen_fd == -1)
+        goto error;
 
     int optval = 1;
     if (setsockopt(server.listen_fd, SOL_SOCKET, SO_REUSEADDR, &optval,
         sizeof(optval)) == -1)
-        die("setsockopt");
+        goto error;
 
     struct sockaddr_in sa = {0};
     sa.sin_family = AF_INET;
     sa.sin_port = htons((uint16_t)port);
-    if (inet_pton(AF_INET, addr_str, &sa.sin_addr) != 1) die("inet_pton");
+    if (inet_pton(AF_INET, addr_str, &sa.sin_addr) != 1)
+        goto error;
 
     if (bind(server.listen_fd, (struct sockaddr *)&sa, sizeof(sa)) == -1)
-        die("bind");
+        goto error;
     if (listen(server.listen_fd, SOMAXCONN) == -1)
-        die("listen");
+        goto error;
 
-    set_nonblocking(server.listen_fd);
+    if (set_nonblocking(server.listen_fd) == -1)
+        goto error;
+
+    return 0;
+
+    error:
+        if (server.listen_fd != -1) {
+            close(server.listen_fd);
+            server.listen_fd = -1;
+        }
+    return -1;
+}
+
+void free_conns(void) {
+    size_t j = 0;
+    for (size_t i = 0; i < server.nconns; i++) {
+        if (server.conns[i].fd != -1) {
+            if (i != j)
+                server.conns[j] = server.conns[i];
+            j++;
+        }
+    }
+    server.nconns = j;
 }
 
 int main(int argc, char *argv[]) {
@@ -470,13 +524,18 @@ int main(int argc, char *argv[]) {
         server.conns[i].file_fd = -1;
     }
 
-    parse_args(argc, argv);
-    setup_listen_socket();
+    if (parse_args(argc, argv) == -1)
+        exit(EXIT_FAILURE);
+
+    if (setup_listen_socket() == -1)
+        die("setup_listen_socket");
 
     server.kq = kqueue();
-    if (server.kq == -1) die("kqueue");
+    if (server.kq == -1)
+        die("kqueue");
 
-    add_kqueue_event(server.listen_fd, EVFILT_READ, NULL);
+    if (add_kqueue_event(server.listen_fd, EVFILT_READ, NULL) == -1)
+        die("add_kqueue_event");
 
     struct kevent events[MAX_KEVENTS] = {0};
     while (true) {
@@ -504,15 +563,7 @@ int main(int argc, char *argv[]) {
         }
 
         /* удаление закрытых соединений */
-        size_t j = 0;
-        for (size_t i = 0; i < server.nconns; i++) {
-            if (server.conns[i].fd != -1) {
-                if (i != j)
-                    server.conns[j] = server.conns[i];
-                j++;
-            }
-        }
-        server.nconns = j;
+        free_conns();
     }
 
     exit(EXIT_SUCCESS);
